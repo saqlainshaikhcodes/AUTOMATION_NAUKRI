@@ -1,0 +1,12 @@
+.env
+state.json
+state.b64
+__pycache__/
+*.pyc
+debug/
+logs/
+.DS_Store
+*.png
+applied.json
+unknown_questions.json
+report.md

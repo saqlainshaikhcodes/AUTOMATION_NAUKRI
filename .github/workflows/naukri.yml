@@ -1,0 +1,114 @@
+name: Naukri Daily Update
+
+on:
+  schedule:
+    # GitHub cron UTC me hota hai. 18:29 UTC = 11:59 PM IST
+    - cron: "29 18 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = sirf jobs dikhao, apply mat karo (pehli baar yahi chalao)"
+        default: "false"
+      max_applies:
+        description: "Is run me max kitni jobs (test ke liye 3)"
+        default: "40"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: naukri-update
+  cancel-in-progress: false
+
+jobs:
+  update-naukri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+          sudo apt-get install -y xvfb
+
+      # Secret ka sirf hash cache key me jaata hai (secret khud nahi).
+      # Naya session secret daalte hi hash badalta hai -> purana cache ignore hota hai.
+      - name: Hash session secret
+        id: sess
+        env:
+          STATE_B64: ${{ secrets.NAUKRI_STATE_B64 }}
+        run: echo "h=$(printf '%s' "$STATE_B64" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore latest session (cookies)
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: naukri-state-${{ steps.sess.outputs.h }}-${{ github.run_id }}
+          restore-keys: naukri-state-${{ steps.sess.outputs.h }}-
+
+      - name: Seed session from secret (agar cache khali ho)
+        env:
+          STATE_B64: ${{ secrets.NAUKRI_STATE_B64 }}
+        run: |
+          if [ ! -f state.json ] && [ -n "$STATE_B64" ]; then
+            printf '%s' "$STATE_B64" | base64 -d > state.json
+            echo "state.json secret se bana"
+          elif [ -f state.json ]; then
+            echo "state.json cache se mila"
+          else
+            echo "::warning::NAUKRI_STATE_B64 secret nahi hai - password login try hoga (OTP aayega to fail)"
+          fi
+
+      # Apply history (applied.json) run-to-run yaad rakho taaki same job dobara apply na ho.
+      # restore/save alag hain + save if: always(), taaki run fail ho tab bhi history bache.
+      - name: Restore apply history
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            applied.json
+            unknown_questions.json
+          key: naukri-applied-${{ github.run_id }}
+          restore-keys: naukri-applied-
+
+      # Headed browser virtual display (xvfb) ke andar chalta hai,
+      # kyunki headless mode par Naukri login form nahi dikhata.
+      - name: Run Naukri update
+        env:
+          NAUKRI_USER: ${{ secrets.NAUKRI_USER }}
+          NAUKRI_PASS: ${{ secrets.NAUKRI_PASS }}
+          RESUME_PATH: Saqlain_Shaikh_Senior_Full_Stack_Developer.pdf
+          HEADLESS: "false"
+          TEST_MODE: "false"
+          RUN_APPLY: "true"
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          MAX_APPLIES: ${{ github.event.inputs.max_applies || '40' }}
+          TIME_BUDGET_MIN: "22"
+        run: xvfb-run -a --server-args="-screen 0 1366x768x24" python main.py
+
+      - name: Save apply history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            applied.json
+            unknown_questions.json
+          key: naukri-applied-${{ github.run_id }}
+
+      - name: Upload debug + reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: |
+            debug/
+            report.md
+            unknown_questions.json
+          retention-days: 7
+          if-no-files-found: ignore
